@@ -26,3 +26,159 @@ rotate_speed.cell_induced(mono_frequency().adjusted_plane.mapping_restored(asyni
 你的移動數據與城市環境音訊融合，進行貝氏分析。
 分析結果回傳至全息知識圖譜，為城市規劃提供決策增益。
 verified_ring 確保這次貢獻被記錄，用戶獲得獎勵。
+
+------------------------------------------------------------------------------------------------------
+
+在主動式磁場補償（磁力扣除）的 IC 設計中，由於我們採用了自適應調諧與開關電容/通道融合的架構，在晶片內部通常會採用混合訊號（Mixed-Signal）的設計方式：
+
+類比部分（Analog）負責高頻、大電流的 H 橋線圈驅動與斬波放大。
+
+數位部分（Digital）負責控制類比開關、調諧電容陣列（Capacitor Bank）以調整類比史密斯網路的零極點，並處理通道切換與中斷警報。
+
+為了在 Cadence 中進行混合訊號模擬（AMS, Analog Mixed-Signal Simulation），我們需要用 Verilog 或 Verilog-A/AMS 來撰寫控制邏輯。以下為您提供負責核心控制與自適應調諧邏輯的 Verilog RTL 原始碼。
+
+🛠️ 磁力扣除控制器 Verilog 碼 (Top-Level Control)
+這個數位模組負責接收來自類比 AFE 比較器或 ADC 的誤差訊號，並動態輸出控制字組（Control Word）給類比端的電容陣列（用來對消時滯 SMITH_ECCLIPSE）以及 H 橋驅動器。
+
+Verilog
+// ====================================================================
+// 模組名稱：magnetic_cancellation_controller
+// 功能：主動式磁場補償自適應調諧與 H 橋安全保護控制器
+// ====================================================================
+
+module magnetic_cancellation_controller (
+    input  wire        clk,              // 系統時脈 (例如 20MHz 邊緣運算時脈)
+    input  wire        rst_n,            // 非同步低電位復位
+    
+    // 來自類比前端 (AFE) 的感測與狀態訊號
+    input  wire [11:0] afe_error_mag,    // 12-bit 類比感測誤差強度 (來自高速ADC)
+    input  wire        afe_error_sign,   // 誤差磁場方向：0 為正向, 1 為反向
+    input  wire        over_current_det, // 類比 H 橋過流偵測硬體中斷 (Active High)
+    
+    // 輸出至類比開關與補償網路 (Analog Matrix)
+    output reg  [3:0]  cap_array_sel,    // 控制史密斯預測網路的可調電容陣列 (4-bit 權重)
+    output reg         h_bridge_en,      // H 橋驅動級致能訊號
+    output reg         h_bridge_p1,      // H 橋對角 PMOS/NMOS 導通相 1
+    output reg         h_bridge_p2,      // H 橋對角 PMOS/NMOS 導通相 2
+    
+    // 系統安全警報輸出 (對應 DSL 中的 _trigger_buzz)
+    output reg         alarm_trigger,    // 異常磁場/過流中斷警報
+    output reg         buzz_out          // 蜂鳴器驅動訊號 (PWM 輸出)
+);
+
+    // 內部參數定義
+    localparam MAX_ERROR_THRESHOLD = 12'hD00; // 異常磁場閾值
+    localparam SAFE_ERROR_LIMIT    = 12'h080; // 收斂安全範圍 (磁力已成功扣除)
+    
+    // 內部暫存器
+    reg [23:0] buzz_cnt;
+    reg [3:0]  adapt_state;
+    
+    // 狀態機定義 (State Machine)
+    localparam STATE_IDLE    = 4'b0001;
+    localparam STATE_TRACK   = 4'b0010;
+    localparam STATE_TUNING  = 4'b0100;
+    localparam STATE_PROTECT = 4'b1000;
+
+    // ----------------------------------------------------------------
+    // 1. 核心控制與自適應狀態機 (FSM)
+    // ----------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            adapt_state   <= STATE_IDLE;
+            cap_array_sel <= 4'b0000;
+            h_bridge_en   <= 1'b0;
+            alarm_trigger <= 1'b0;
+        end else begin
+            case (adapt_state)
+                STATE_IDLE: begin
+                    h_bridge_en   <= 1'b1;
+                    alarm_trigger <= 1'b0;
+                    if (afe_error_mag > SAFE_ERROR_LIMIT) begin
+                        adapt_state <= STATE_TRACK;
+                    end
+                end
+                
+                STATE_TRACK: begin
+                    // 如果類比過流保護觸發，立刻切入硬體保護狀態
+                    if (over_current_det) begin
+                        adapt_state <= STATE_PROTECT;
+                    end else if (afe_error_mag > MAX_ERROR_THRESHOLD) begin
+                        adapt_state <= STATE_TUNING; // 誤差過大，需要動態調整補償相位
+                    end else if (afe_error_mag <= SAFE_ERROR_LIMIT) begin
+                        adapt_state <= STATE_IDLE;   // 成功扣除，回到平衡狀態
+                    end
+                end
+                
+                STATE_TUNING: begin
+                    // 動態調整電容陣列，改變類比史密斯網路的極零點 (消除時滯)
+                    if (afe_error_sign) begin
+                        cap_array_sel <= cap_array_sel + 1'b1; // 增加補償相位
+                    end else begin
+                        cap_array_sel <= cap_array_sel - 1'b1; // 減少補償相位
+                    end
+                    alarm_trigger <= 1'b1; // 發出即時警報提示正在劇烈調諧
+                    adapt_state   <= STATE_TRACK;
+                end
+                
+                STATE_PROTECT: begin
+                    // 強制關閉 H 橋，防止線圈大電流燒毀晶片
+                    h_bridge_en   <= 1'b0;
+                    alarm_trigger <= 1'b1;
+                    if (!over_current_det) begin
+                        adapt_state <= STATE_IDLE; // 故障排除後復位
+                    end
+                end
+                
+                default: adapt_state <= STATE_IDLE;
+            endcase
+        end
+    end
+
+    // ----------------------------------------------------------------
+    // 2. H 橋線性驅動相位切換 (配合差動方向)
+    // ----------------------------------------------------------------
+    always @(*) begin
+        if (!h_bridge_en) begin
+            h_bridge_p1 = 1'b0;
+            h_bridge_p2 = 1'b0;
+        end else begin
+            // 根據 AFE 偵測到的磁場正反向，動態切換 H 橋電流方向，實現主動扣除 (-B)
+            if (afe_error_sign == 1'b0) begin
+                h_bridge_p1 = 1'b1;
+                h_bridge_p2 = 1'b0;
+            end else begin
+                h_bridge_p1 = 1'b0;
+                h_bridge_p2 = 1'b1;
+            end
+        end
+    end
+
+    // ----------------------------------------------------------------
+    // 3. 蜂鳴器安全警報 PWM 產生器 (Buzz Feature Pattern)
+    // ----------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            buzz_cnt <= 24'd0;
+            buzz_out <= 1'b0;
+        end else if (alarm_trigger) begin
+            // 當警報觸發時，產生一個 4KHz 的音訊方波驅動外部蜂鳴器
+            if (buzz_cnt >= 24'd2500) begin // 假設 clk = 20MHz，2500分頻約為 4KHz 翻轉
+                buzz_cnt <= 24'd0;
+                buzz_out <= ~buzz_out;
+            end else begin
+                buzz_cnt <= buzz_cnt + 1'b1;
+            end
+        end else begin
+            buzz_cnt <= 24'd0;
+            buzz_out <= 1'b0;
+        end
+    end
+
+endmodule
+📊 模擬與測試平台驗證 (Testbench 提示)
+當您將這段 Verilog 碼放入 Cadence NC-Verilog 或 Synopsys VCS 中進行模擬時，為了驗證主動磁力扣除的邏輯，您的 Testbench (測試平台) 應該模擬以下情境：
+
+突發磁場干擾輸入： 給予 afe_error_mag 一個從 12'h000 到 12'hE00 的突變階躍，驗證狀態機是否能從 STATE_IDLE 經由 STATE_TRACK 正確跳轉到 STATE_TUNING，且觀察 cap_array_sel 是否開始動態累加。
+
+硬體過流中斷 (Over-current Interrupt)： 在狀態機運作時，將 over_current_det 拉高，確認 h_bridge_en、h_bridge_p1 和 h_bridge_p2 必須在一個時脈週期內立刻歸零。這是保護類比 H 橋功率電晶體（Power Stage）不被燒毀的關鍵防線。
