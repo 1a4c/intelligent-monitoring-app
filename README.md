@@ -182,3 +182,57 @@ endmodule
 突發磁場干擾輸入： 給予 afe_error_mag 一個從 12'h000 到 12'hE00 的突變階躍，驗證狀態機是否能從 STATE_IDLE 經由 STATE_TRACK 正確跳轉到 STATE_TUNING，且觀察 cap_array_sel 是否開始動態累加。
 
 硬體過流中斷 (Over-current Interrupt)： 在狀態機運作時，將 over_current_det 拉高，確認 h_bridge_en、h_bridge_p1 和 h_bridge_p2 必須在一個時脈週期內立刻歸零。這是保護類比 H 橋功率電晶體（Power Stage）不被燒毀的關鍵防線。
+
+--------------------------------------------------------------------------------------------------------------------------------------
+
+┌────────────────┐      ┌──────────────────────────┐      ┌──────────────────────────┐
+│  原料端 (Raw)   │ ───> │  中間加工/輸送與數據淨化 │ ───> │ 廢料/產出端 (Waste/Scrap)│
+└────────────────┘      └──────────────────────────┘      └──────────────────────────┘
+  Field_socket           purified_laplace_source            flow_water_pump_odo
+  [原料/載具接入]           [濾除噪訊、計算流量/慣性]            [計算廢料/累積里程]
+                                     │
+                                     ▼ (評估佇列)
+                        tri-assessing_port_queue
+                        [驗證是否達到廢料/異常門檻]
+                                     │
+                                     ▼ (12-Cycle 即時觸發)
+                        prospensed_commute_to_perished_status()
+                        [動態排程制動：分流至廢料區 / 觸發補料派工]
+
+Field_socket_gel_link.approved_alike_pending_motion.initiated_secting[ ... ]
+Field_socket_gel_link（原料/載具連結鏈）：
+
+製造意涵：原料（如膠合劑、化學源料、金屬胚料）在加工站/管道間的實體/邏輯接頭，代表「原料已進入製程入口」。
+
+approved_alike_pending_motion（排程排隊與動態派工）：
+
+製造意涵：MES（製造執行系統）或 APS（先進排程系統）核准的「下一個待執行加工工序/位移卡（Pending Motion）」。
+
+initiated_secting（分段/加工執行）：
+
+製造意涵：啟動切割、反應、混合或分段加工作業。
+
+... tilt_side_session[road_channel_deceased_chain.purified_laplace_source(tape_subject.inertia.record_in(SUP_socket()))] ...
+purified_laplace_source（即時感測與訊號淨化）：
+
+製造意涵：在原料加工或傳輸過程中（如擠出機、流體管道、輸送帶），感測器（慣性/壓力/流量）會受到機械震動干擾。透過拉普拉斯平滑，過濾雜訊，精確計算出「原料實際消耗速率與即時質量/流量」。
+
+road_channel_deceased_chain（廢料/瓶頸警告）：
+
+製造意涵：當感測資料顯示路徑堵塞、原料品質劣化，或是預測即將產生不良品/廢料（Deceased Chain）時。
+
+... .abide_function[aid_alliance[sil-cement_id().tri-assessing_port_queue ...
+tri-assessing_port_queue（三重確認與排程轉向佇列）：
+
+製造意涵：排程系統不會因為單一噪訊就停機。它透過 3 重驗證機制（如：流量下降 + 壓力異常 + 時序超時）確定廢料生成或設備異常。
+
+... tau_system_tribe_os-tick_clock.12-cycle_processed.event[raw_status.flow_water_pump_odo.send().prospensed_commute_to_perished_status()]
+12-cycle_processed & prospensed_commute_to_perished_status()（排程制動與廢料處理）：
+
+製造意涵：在 12 個控制週期（OS Ticks）內，動態觸發排程制動器（Actuator）：
+
+將目前加工中的不良半成品或廢料引導至廢料槽（Wasteway/Scrap Station）。
+
+發送當前泵浦/機台的累積里程數據（flow_water_pump_odo.send()）。
+
+更新 APS 派工單狀態，將此批次標記為「失效/報廢（Perished Status）」，並自動向 MES 請求備用原料補單。
